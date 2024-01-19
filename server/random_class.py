@@ -1,5 +1,7 @@
 import random as rand
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from diffusers import DiffusionPipeline
 
 # A single class
 class Class:
@@ -20,27 +22,61 @@ class ClassGenerator:
         self.classes = []
 
         # Used for text generation
-        self.model_name = "TheBloke/Llama-2-7B-Chat-GPTQ"
-        self.initialize_model()
+        self.model_name_text_generation = "TheBloke/Llama-2-7B-Chat-GPTQ"
+        self.model_text_generation = None
+        self.tokenizer = None
 
-    def initialize_model(self):
-        print("Initializing model...")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map='auto')
-        self.model.generation_config = GenerationConfig(eos_token_id=self.tokenizer.eos_token_id, max_new_tokens=1000, pad_token_id=self.tokenizer.eos_token_id, num_beams=5, do_sample=True, temperature=0.7, top_k=50, top_p=0.95, repetition_penalty=1.2, length_penalty=1.0, no_repeat_ngram_size=3, num_return_sequences=1)
+        # Used for image generation
+        self.model_name_image_generation = 'stabilityai/stable-diffusion-xl-base-1.0'
+        self.model_image_generation = None
+
+    # Initialize the model for text generation
+    def initialize_text_generation_model(self):
+        print("Initializing text generation model...")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_text_generation)
+        self.model_text_generation = AutoModelForCausalLM.from_pretrained(self.model_name_text_generation, device_map='auto')
+        self.model_text_generation.generation_config = GenerationConfig(eos_token_id=self.tokenizer.eos_token_id, max_new_tokens=1000, pad_token_id=self.tokenizer.eos_token_id, num_beams=5, do_sample=True, temperature=0.7, top_k=50, top_p=0.95, repetition_penalty=1.2, length_penalty=1.0, no_repeat_ngram_size=3, num_return_sequences=1)
+
+    # Initialize the model for image generation
+    def initialize_image_generation_model(self):
+        print("Initializing image generation model...")
+        self.model_image_generation = DiffusionPipeline.from_pretrained(self.model_name_image_generation, torch_dtype=torch.bfloat16, use_safetensors=True)
+        self.model_image_generation.to('cuda')
+        self.model_image_generation.enable_xformers_memory_efficient_attention()
+
+
+    # Clean up any active models
+    def cleanup_models(self):
+        if self.tokenizer is not None:
+            del self.tokenizer
+            self.tokenizer = None
+
+        if self.model_text_generation is not None:
+            del self.model_text_generation
+            self.model_text_generation = None
+
+        if self.model_image_generation is not None:
+            del self.model_image_generation
+            self.model_image_generation = None
+        
+        torch.cuda.empty_cache()
 
     def add_class(self, name):
         self.classes.append(Class(name))
 
-    def get_random_class(self):
-        return rand.choice(self.classes)
+    def get_random_classes(self, num_classes):
+        return rand.sample(self.classes, num_classes)
+
+    def generate_image(self, prompt):
+       image = self.model_image_generation(prompt, num_inference_steps=20).images[0]
+       return image
 
     # Generate text from a prompt
     def generate_text(self, prompt):
         # Tokenize the prompt
-        inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model.device)
+        inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model_text_generation.device)
         # Generate the text
-        outputs = self.model.generate(inputs)
+        outputs = self.model_text_generation.generate(inputs)
         # Decode the text
         text = self.tokenizer.batch_decode(outputs[:, inputs.shape[1]:])[0]
         text = text.replace("</s>", "")
@@ -124,6 +160,51 @@ class ClassGenerator:
         # Generate the text
         return self.generate_text(prompt_template.format(prompt))
 
+    # Generate a list of descriptors for a class
+    def generate_class_descriptors(self, character_class):
+        prompt = """
+            I have a class from dungeons and dragons.
+            I want you to give me a list of descriptors for this class.
+            The descriptors should describe the class.
+            The descriptors should be separated by commas.
+            Here is an example for the input "Wizard": "magical energy, fire, ice, staff, robes, old, beard".
+            Here is an example for the input "Barbarian": "muscles, strong, rage, battleaxe, fighting".
+            Here is an example for the input "Rogue": "sneaky, stealthy, daggers, shadows, blood".
+            Your output should only be a comma separated list of descriptors.
+            Your output should only be a comma separated list of descriptors.
+            Your output should only be a comma separated list of descriptors.
+            Only give me the descriptors.
+            Don't say anything that isn't the descriptors.
+            Here is the class: """ + character_class.name + ".\n"
+
+        prompt_template = """
+            [INST] <<SYS>>
+            You are an assistant that is used to generate metadata for dungeons and dragon classes. Be crisp and clear in your responses. Only reply with what your are asked for, nothing else.
+            <</SYS>>
+            {}[/INST]
+            The prompt for the new class is: 
+        """
+
+        return self.generate_text(prompt_template.format(prompt))
+
+    # Generate a portrait prompt for a group of classes
+    def generate_portrait_prompt(self, classes):
+        descriptors = []
+        for character_class in classes:
+            descriptors += self.generate_class_descriptors(character_class).split(", ")[1:]
+
+        descriptors = [d.strip() for d in descriptors if d.strip() != ""]
+
+        # Get a random subset of the descriptors
+        rand.shuffle(descriptors)
+        if len(descriptors) > 6:
+            descriptors = descriptors[:4]
+        else:
+            descriptors = descriptors[:len(descriptors)]
+
+        prompt = f"A character portrait for dungeons and dragons, single character, color, {','.join(descriptors)}, high detail, high quality"
+        return prompt
+
     # Generate the details for a group of classes
     def get_class_group_details(self, classes):
         # Generate the name
@@ -144,33 +225,35 @@ if __name__ == "__main__":
     generator = ClassGenerator()
 
     # Add all the classes
-    generator.add_class("Barbarian")
-    generator.add_class("Bard")
-    generator.add_class("Cleric")
-    generator.add_class("Druid")
-    generator.add_class("Fighter")
-    generator.add_class("Monk")
-    generator.add_class("Paladin")
-    generator.add_class("Ranger")
-    generator.add_class("Rogue")
-    generator.add_class("Sorcerer")
-    generator.add_class("Warlock")
-    generator.add_class("Wizard")
+    names = [
+        "Barbarian",
+        "Bard",
+        "Cleric",
+        "Druid",
+        "Fighter",
+        "Monk",
+        "Paladin",
+        "Ranger",
+        "Rogue",
+        "Sorcerer",
+        "Warlock",
+        "Wizard"
+    ]
+    for name in names:
+        generator.add_class(name)
 
-    # Generate 3 random classes and store in an array with no duplicates
-    classes = []
-    while len(classes) < 3:
-        c = generator.get_random_class()
-        if c not in classes:
-            classes.append(c)    
+    num_characters = 4
+    for i in range(num_characters):
+        # Generate 3 random classes and store in an array with no duplicates
+        classes = generator.get_random_classes(3)
 
-    # Generate the details for the classes
-    details = generator.get_class_group_details(classes)
+        # Generate the name
+        name = generator.generate_name(classes)
+        description = generator.generate_description(classes)
 
-    # Print the details
-    print ('\n\n\n----------------------------------------------------------------\n\n\n')
-    print("Classes: " + ", ".join([c.name for c in details.classes]) + "\n")
-    print("Name: " + details.name + "\n")
-    print("Description: " + details.description + "\n")
-    print("Playstyle: " + details.playstyle)
-    print ('\n\n\n----------------------------------------------------------------\n\n\n')
+        # Print the details
+        print ('\n----------------------------------------------------------------\n')
+        print("Classes: " + ", ".join([c.name for c in classes]) + "\n")
+        print("Name: " + name + "\n")
+        print("Description: " + description + "\n")
+        print ('\n----------------------------------------------------------------\n')
